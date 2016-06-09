@@ -22,7 +22,7 @@ def __parse_test__(j):
         i = t["test_id"]
         new_test = TestRequest(i, r, d, dur)
         tests.append(new_test)
-    return tests
+    return sorted(tests, key=lambda x: x.test_id)
 
 
 def __parse_vehicle__(j):

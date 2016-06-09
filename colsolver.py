@@ -1,7 +1,6 @@
 from collections import defaultdict
 from gurobipy import *
 from uuid import uuid1
-from pricing import EnumPricer
 
 
 class ColSolver:
@@ -91,7 +90,11 @@ class ColSolver:
         iter = 0
 
         all_col_list = ColEnumerator().enum()
-        pricer = EnumPricer(all_col_list)
+
+        from pricing import EnumPricer,MIPPricer
+        # pricer2 = EnumPricer(all_col_list)
+
+        pricer = MIPPricer(self.__tests__, self.__vehicles__, self.__rehits__)
         while iter < max_iter:
             m.optimize()
             # get dual info
@@ -103,6 +106,10 @@ class ColSolver:
                 vehicle_dual[vid] = constr.Pi
             neg_rc_col, rc = pricer.price(test_dual, vehicle_dual)
             if neg_rc_col is None:
+                if m.status == GRB.OPTIMAL:
+                    print "master val:{}, most neg rc: {}".format(m.ObjVal,"positive" )
+                else:
+                    print m.status
                 break
             else:
                 # add variable
@@ -116,7 +123,7 @@ class ColSolver:
                 for tid in neg_rc_col.seq:
                     grb_col.addTerms(1, self.test_cover_constr[tid])
                 v = m.addVar(0, GRB.INFINITY, 50 + neg_rc_col.cost, GRB.CONTINUOUS,
-                             "use col" + str(neg_rc_col), grb_col)
+                             "use col" + str(neg_rc_col.cid), grb_col)
                 self.var[neg_rc_col] = v
                 m.update()
 
