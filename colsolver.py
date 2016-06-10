@@ -91,10 +91,11 @@ class ColSolver:
 
         all_col_list = ColEnumerator().enum()
 
-        from pricing import EnumPricer,MIPPricer
+        from pricing import EnumPricer,MIPPricer,HeuristicPricer
         # pricer2 = EnumPricer(all_col_list)
 
-        pricer = MIPPricer(self.__tests__, self.__vehicles__, self.__rehits__)
+        # pricer = MIPPricer(self.__tests__, self.__vehicles__, self.__rehits__)
+        pricer = HeuristicPricer(self.__tests__, self.__vehicles__,self.__rehits__)
         while iter < max_iter:
             m.optimize()
             # get dual info

@@ -184,13 +184,69 @@ class HeuristicPricer:
         self.__tests__ = tests
         self.__vehicles__ = vehicles
         self.__rehits__ = rehits
+        self.__build_cache__()
 
-    def __select_best__(self, vehicle, seq, test_duals):
-        curr_time = vehicle.release + sum([t.dur for t in seq])
+    def __build_cache__(self):
+        self.__test_map__ = {}
+        self.__vehicle_map__ = {}
+        for t in self.__tests__:
+            self.__test_map__[t.test_id] = t
+        for v in self.__vehicles__:
+            self.__vehicle_map__[v.vehicle_id] = v
 
-        incr = [curr_time+t.dur-t.deadline - test_duals[t.test_id]
-                for t in self.__tests__]
+    def __select_best__(self, vid, seq, test_duals):
+        curr_time = self.__vehicle_map__[vid].release
+        for tid in seq:
+            t = self.__test_map__[tid]
+            if curr_time < t.release:
+                curr_time = t.release
+            curr_time += t.dur
 
+        # compute the reduced cost increment for evey tests
+        test_id_list = sorted(self.__test_map__.keys(), key=lambda tid: self.__test_map__[tid].release)
+        incr = [(tid, curr_time + max(self.__test_map__[tid].dur -
+                                      self.__test_map__[tid].deadline, 0) - test_duals[tid])
+                for tid in test_id_list if self.__is_seq_comp_with_test__(seq, tid)]
+        if len(incr) == 0:
+            return None
+        rc_incr = np.array(map(lambda x: x[-1], incr))
+        # need to conquer the initiative to select later released tests
+        min_rc_incr, min_idx = rc_incr.min(), rc_incr.argmin()
+        if min_rc_incr < 0:
+            return incr[min_idx][0]
+        return None
 
-    def __is_seq_comp_with_test__(self,seq,test):
-        pass
+    def price(self, test_dual, vehicle_dual):
+        best_seq_on_each_vehicle = [(vid, self.__price_one_vehicle__(vid, test_dual, vehicle_dual))
+                                    for vid in self.__vehicle_map__.keys()]
+        # generate reduced cost
+        best_col_on_each_vehicle = [Col(seq, vid) for vid, seq in best_seq_on_each_vehicle]
+        reduced_cost = [self.__reduced_cost__(col, test_dual, vehicle_dual) for col in best_col_on_each_vehicle]
+        reduced_cost = np.array(reduced_cost)
+        if reduced_cost.min() < 0:
+            return best_col_on_each_vehicle[reduced_cost.argmin()], reduced_cost.min()
+        return None, reduced_cost.min()
+
+    def __price_one_vehicle__(self, vid, test_dual, vehicle_dual):
+        seq = []
+        while True:
+            tid = self.__select_best__(vid, seq, test_dual)
+            if not tid:
+                break
+            seq.append(tid)
+        return seq
+
+    def __is_seq_comp_with_test__(self, seq, test):
+        if test in seq:
+            return False
+        for tid in seq:
+            if not self.__rehits__[tid][test]:
+                return False
+        return True
+
+    def __reduced_cost__(self, col, test_dual, vehicle_dual):
+        cost = 50 + col.cost
+        for tid in col.seq:
+            cost -= test_dual[tid]
+        cost -= vehicle_dual[col.vid]
+        return cost
