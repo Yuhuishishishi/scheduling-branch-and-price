@@ -89,7 +89,8 @@ class ColSolver:
         max_iter = 1e5
         iter = 0
 
-        all_col_list = ColEnumerator().enum()
+        # all_col_list = ColEnumerator().enum()
+        seed_col_list = ColEnumerator().enum(maxlvl=0)
 
         from pricing import EnumPricer,MIPPricer,HeuristicPricer
         # pricer2 = EnumPricer(all_col_list)
@@ -105,7 +106,9 @@ class ColSolver:
                 test_dual[tid] = constr.Pi
             for vid, constr in self.vehicle_cap_constr.iteritems():
                 vehicle_dual[vid] = constr.Pi
-            neg_rc_col, rc = pricer.price(test_dual, vehicle_dual)
+            # neg_rc_col, rc = pricer.price(test_dual, vehicle_dual)
+            neg_rc_col, rc = pricer.price2(test_dual, vehicle_dual, seed_col_list)
+
             if neg_rc_col is None:
                 if m.status == GRB.OPTIMAL:
                     print "master val:{}, most neg rc: {}".format(m.ObjVal,"positive" )
@@ -127,6 +130,8 @@ class ColSolver:
                              "use col" + str(neg_rc_col.cid), grb_col)
                 self.var[neg_rc_col] = v
                 m.update()
+
+                seed_col_list.append(neg_rc_col)
 
 
 class Col:

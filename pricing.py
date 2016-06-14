@@ -1,3 +1,6 @@
+import multiprocessing
+from collections import defaultdict
+
 from gurobipy import *
 import numpy as np
 
@@ -185,6 +188,7 @@ class HeuristicPricer:
         self.__vehicles__ = vehicles
         self.__rehits__ = rehits
         self.__build_cache__()
+        self._exact_pricer = None
 
     def __build_cache__(self):
         self.__test_map__ = {}
@@ -202,18 +206,27 @@ class HeuristicPricer:
                 curr_time = t.release
             curr_time += t.dur
 
-        # compute the reduced cost increment for evey tests
-        test_id_list = sorted(self.__test_map__.keys(), key=lambda tid: self.__test_map__[tid].release)
-        incr = [(tid, curr_time + max(self.__test_map__[tid].dur -
-                                      self.__test_map__[tid].deadline, 0) - test_duals[tid])
-                for tid in test_id_list if self.__is_seq_comp_with_test__(seq, tid)]
-        if len(incr) == 0:
-            return None
-        rc_incr = np.array(map(lambda x: x[-1], incr))
-        # need to conquer the initiative to select later released tests
-        min_rc_incr, min_idx = rc_incr.min(), rc_incr.argmin()
-        if min_rc_incr < 0:
-            return incr[min_idx][0]
+        # partition the tests according to release time
+
+        release_test_group = defaultdict(list)
+        for t in self.__test_map__.values():
+            release_test_group[t.release].append(t.test_id)
+
+        for r in sorted(release_test_group.keys()):
+            test_id_list = release_test_group[r]
+
+            # compute the reduced cost increment for evey tests
+            # test_id_list = sorted(self.__test_map__.keys(), key=lambda tid: self.__test_map__[tid].release)
+            incr = [(tid, curr_time + max(self.__test_map__[tid].dur -
+                                          self.__test_map__[tid].deadline, 0) - test_duals[tid])
+                    for tid in test_id_list if self.__is_seq_comp_with_test__(seq, tid)]
+            if len(incr) == 0:
+                continue
+            rc_incr = np.array(map(lambda x: x[-1], incr))
+            # need to conquer the initiative to select later released tests
+            min_rc_incr, min_idx = rc_incr.min(), rc_incr.argmin()
+            if min_rc_incr < 0:
+                return incr[min_idx][0]
         return None
 
     def price(self, test_dual, vehicle_dual):
@@ -226,6 +239,36 @@ class HeuristicPricer:
         if reduced_cost.min() < 0:
             return best_col_on_each_vehicle[reduced_cost.argmin()], reduced_cost.min()
         return None, reduced_cost.min()
+
+
+
+
+    def price2(self, test_dual, vehicle_dual, seed_col_set):
+        seq_set = [(col.vid, col.seq, test_dual) for col in seed_col_set]
+        pool = multiprocessing.Pool(multiprocessing.cpu_count())
+        # longest_seq = pool.map(HeuristicPricer._extend_seq_wrapper, seq_set)
+        longest_seq = [(s[0], self.__extend_seq__(s[0], s[1], test_dual)) for s in seq_set]
+
+        best_col = [Col(s[1], s[0]) for s in longest_seq]
+        rc = [self.__reduced_cost__(col, test_dual, vehicle_dual) for col in best_col]
+        rc = np.array(rc)
+        if rc.min() < -0.001:
+            return best_col[rc.argmin()], rc.min()
+
+        # mip pricer
+        if not self._exact_pricer:
+            self._exact_pricer = MIPPricer(self.__tests__, self.__vehicles__, self.__rehits__)
+        neg_col, rc = self._exact_pricer.price(test_dual, vehicle_dual)
+        return neg_col, rc
+
+    def __extend_seq__(self, vid, seq, test_dual):
+        result = seq[:]
+        while True:
+            tid = self.__select_best__(vid, result, test_dual)
+            if not tid:
+                break
+            result.append(tid)
+        return result
 
     def __price_one_vehicle__(self, vid, test_dual, vehicle_dual):
         seq = []
