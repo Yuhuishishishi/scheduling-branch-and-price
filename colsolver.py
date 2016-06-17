@@ -173,6 +173,7 @@ class ColEnumerator:
     def __init__(self):
         pass
 
+
     @staticmethod
     def __enum_col__(collist):
         result = []

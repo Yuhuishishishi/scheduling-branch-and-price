@@ -1,10 +1,44 @@
+from Queue import Queue, PriorityQueue
 from collections import defaultdict
 
 from gurobipy import *
 
+from colsolver import ColEnumerator, Col
+
 TEST_MAP = {}
 VEHICLE_MAP = {}
 REHIT_MAP = {}
+
+
+
+class BPSolver:
+    def __init__(self, tests, vehicles, rehits):
+        map(lambda t: TEST_MAP.update({t.test_id: t}), tests)
+        map(lambda v: VEHICLE_MAP.update({v.vehicle_id: v}), vehicles)
+        map(lambda r: REHIT_MAP.update({r: rehits[r]}), rehits)
+        self._pending_nodes = Queue()
+        self._pending_nodes_best_bound = PriorityQueue()
+
+        self._tests = tests
+        self._vehicles = vehicles
+        self._rehits = rehits
+
+    def solve(self):
+        # enumerate the initial columns
+        en = ColEnumerator()
+        init_col_list = en.enum(0)
+
+        # create the root node
+        root = Node(init_col_list,[], self)
+        root._solve_lp()
+
+
+
+
+
+
+
+
 
 
 class Node:
@@ -12,12 +46,13 @@ class Node:
     UB = float("inf")
     NID = 0
 
-    def __init__(self, col_set, branch_constr):
+    def __init__(self, col_set, branch_constr, bpsolver):
         self._col_set = col_set[:]
         self._branch_constr_list = branch_constr[:]
         self.solved = False
         self._master_solver = None
         self._pricer = None
+        self._bp_solver = bpsolver
 
     def _build_master_prb(self):
         m = Model("bp sub problem {}".format(Node.NID))
@@ -57,7 +92,7 @@ class Node:
                 grb_col.addTerms(1, t_constr)
                 self._cols_contain_test_map[tid].append(col)
 
-            v = m.addVar(0, 1, 50 + col.cost, GRB.BINARY, "use col" + str(col), grb_col)
+            v = m.addVar(0, GRB.INFINITY, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
             # check branching constraints
             affect = self._bound_enforced_by_branch_constr(col)
             if affect == BranchConstr.FIX_TO_ONE:
@@ -118,7 +153,7 @@ class Node:
         ================================='''
         m.objcon = 50
         m.update()
-        M = max([t.dur for t in TEST_MAP]) * 5
+        M = max([t.dur for t in TEST_MAP.values()]) * 5
 
         # vehicle related constraints
         # use one vehicle
@@ -142,7 +177,7 @@ class Node:
             # tardiness
             m.addConstr(start_time + t.dur <= t.deadline + tardiness + M * (1 - use_test))
 
-        ordered_test_list = sorted(TEST_MAP.values(), key=lambda t: t.release)
+        ordered_test_list = sorted(TEST_MAP.values(), key=lambda t: t. test_id)
         for t1 in ordered_test_list:
             tid1 = t1.test_id
             use_test1 = self._use_tests[tid1]
@@ -209,12 +244,91 @@ class Node:
         m.update()
         return m
 
+    def _price(self, test_dual, vehicle_dual):
+        # modify coeff in obj
+        for tid in TEST_MAP:
+            use_test = self._use_tests[tid]
+            use_test.obj = - test_dual[tid]
+        for vid in VEHICLE_MAP:
+            use_vehicle = self._use_vehicles[vid]
+            use_vehicle.obj = -vehicle_dual[vid]
+
+        self._pricer.update()
+        self._pricer.optimize()
+
+        # sorted_t = sorted(TEST_MAP.keys())
+        # for tid1 in sorted_t:
+        #     for tid2 in sorted_t:
+        #         if tid1 <= tid2:
+        #             break
+        #         print "use {}: {}, use {}: {}".format(tid1, self._use_tests[tid1].x, tid2, self._use_tests[tid2].x)
+        #         print tid1,tid2,self._preced[tid1,tid2].x
+        #         print tid2,tid1,self._preced[tid1,tid2].x
+
+
+
+
+        col = None
+        obj_val = None
+        if self._pricer.status == GRB.OPTIMAL:
+            obj_val = self._pricer.objval
+            if obj_val < -0.001:
+                col = self._parse_col()
+
+
+        return col, obj_val
+
+
     def _solve_lp(self):
         # build restricted master problem
+        if not self._master_solver:
+            self._master_solver = self._build_master_prb()
+            # suppress output
+            self._master_solver.params.outputflag=0
 
         # build the pricing problem
+        if not self._pricer:
+            self._pricer = self._build_pricing_prb()
+            # suppress output
+            self._pricer.params.outputflag = 0
 
         # column generation loop
+        max_iter = 1e3
+        iter = 0
+        while iter < max_iter:
+            self._master_solver.optimize()
+            # get dual info
+            test_dual = {}
+            vehicle_dual = {}
+            for tid, constr in self._test_cover_constr.iteritems():
+                test_dual[tid] = constr.Pi
+            for vid, constr in self._vehicle_cap_constr.iteritems():
+                vehicle_dual[vid] = constr.Pi
+
+            neg_col, rc = self._price(test_dual, vehicle_dual)
+            if not neg_col:
+                if self._master_solver.status == GRB.OPTIMAL:
+                    print "master val: {}, rc: {}".format(self._master_solver.objval, rc)
+                else:
+                    print "master infeasible"
+                break
+            else:
+                if self._master_solver.status == GRB.OPTIMAL:
+                    print "master val: {}, rc: {}".format(self._master_solver.objval, rc)
+                else:
+                    print "master infeasible"
+
+
+                grb_col = Column()
+                grb_col.addTerms(1, self._vehicle_cap_constr[neg_col.vid])
+                for tid in neg_col.seq:
+                    grb_col.addTerms(1, self._test_cover_constr[tid])
+                v = self._master_solver.addVar(0, GRB.INFINITY, 50+neg_col.cost, GRB.CONTINUOUS,
+                                               "use col" + str(neg_col.cid), grb_col)
+                self._var[neg_col] = v
+                self._master_solver.update()
+
+                self._col_set.append(neg_col)
 
         # integrality check
 
@@ -320,6 +434,24 @@ class Node:
         # do the integrality check
 
         pass
+
+    def _parse_col(self):
+        tests_used = []
+        for tid in TEST_MAP:
+            use_test = self._use_tests[tid]
+            if use_test.x > 0.5:
+                tests_used.append(tid)
+
+        tests_used_sorted = sorted(tests_used, key=lambda tid: self._start[tid].x)
+        vehicle_used = 0
+        for vid in VEHICLE_MAP:
+            use_vehicle = self._use_vehicles[vid]
+            if use_vehicle.x > 0.5:
+                vehicle_used = vid
+                break
+        col = Col(tests_used_sorted, vehicle_used)
+        return col
+
 
 
 class BranchConstr:
