@@ -46,6 +46,9 @@ class BPSolver:
 
             iter_times += 1
 
+        for k,v in BPSolver.INC_SOL.iteritems():
+            if v > 0.001:
+                print k,v
 
 class Node:
     NID = 0
@@ -386,10 +389,9 @@ class Node:
                 BPSolver.INC_SOL = used_col
 
     def _get_used_cols(self):
-        used_col = []
+        used_col = {}
         for k, v in self._var.iteritems():
-            if v.x > 0.5:
-                used_col.append(k)
+            used_col[k] = v.x
         return used_col
 
     def _int_check(self):
