@@ -1,4 +1,4 @@
-from Queue import Queue, PriorityQueue
+from Queue import Queue, PriorityQueue, LifoQueue
 from collections import defaultdict
 
 from gurobipy import *
@@ -10,13 +10,15 @@ VEHICLE_MAP = {}
 REHIT_MAP = {}
 
 
-
 class BPSolver:
+    BEST_INC_VAL = float("inf")
+    INC_SOL = None
+
     def __init__(self, tests, vehicles, rehits):
         map(lambda t: TEST_MAP.update({t.test_id: t}), tests)
         map(lambda v: VEHICLE_MAP.update({v.vehicle_id: v}), vehicles)
         map(lambda r: REHIT_MAP.update({r: rehits[r]}), rehits)
-        self._pending_nodes = Queue()
+        self._pending_nodes = LifoQueue()
         self._pending_nodes_best_bound = PriorityQueue()
 
         self._tests = tests
@@ -26,33 +28,47 @@ class BPSolver:
     def solve(self):
         # enumerate the initial columns
         en = ColEnumerator()
-        init_col_list = en.enum(0)
+        init_col_list = en.enum(1)
 
         # create the root node
-        root = Node(init_col_list,[], self)
-        root._solve_lp()
+        root = Node(init_col_list, [], self)
+        self._pending_nodes.put(root)
+        self._pending_nodes_best_bound.put((1000, root))
 
+        iter_times = 0
+        while not (self._pending_nodes.empty() or self._pending_nodes_best_bound.empty()):
+            # if iter_times % 2 == 0:
+            node_to_process = self._pending_nodes.get()
+            # else:
+            #     _, node_to_process = self._pending_nodes_best_bound.get()
 
+            node_to_process.process()
 
-
-
-
-
-
+            iter_times += 1
 
 
 class Node:
-    LB = 0
-    UB = float("inf")
     NID = 0
 
+    FRACTIONAL_TEST_ON_VEHICLE = 1
+    FRACTIONAL_TEST_PAIR = 2
+    FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE = 3
+
     def __init__(self, col_set, branch_constr, bpsolver):
-        self._col_set = col_set[:]
-        self._branch_constr_list = branch_constr[:]
+        self._col_set = col_set[:]  # defensive copy
+        self._branch_constr_list = branch_constr[:]  # defensive copy
         self.solved = False
         self._master_solver = None
         self._pricer = None
         self._bp_solver = bpsolver
+
+    def process(self):
+        if not self.solved:
+            print "Entering node"
+            print "Branching constraint:"
+            for c in self._branch_constr_list:
+                print c._tid1, c._tid2, c._vid, c._direction
+            self._solve_lp()
 
     def _build_master_prb(self):
         m = Model("bp sub problem {}".format(Node.NID))
@@ -81,7 +97,10 @@ class Node:
         ==========================================='''
         self._var = {}
 
-        self._cols_contain_test_map = defaultdict(list)
+        # caches to speed int check
+        self._cols_contain_test = defaultdict(list)
+        self._cols_contain_pair_in_order = defaultdict(list)
+
         for col in self._col_set:
             v_constr = self._vehicle_cap_constr[col.vid]
             grb_col = Column()
@@ -90,24 +109,33 @@ class Node:
             for tid in col.seq:
                 t_constr = self._test_cover_constr[tid]
                 grb_col.addTerms(1, t_constr)
-                self._cols_contain_test_map[tid].append(col)
 
-            v = m.addVar(0, GRB.INFINITY, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
-            # check branching constraints
             affect = self._bound_enforced_by_branch_constr(col)
             if affect == BranchConstr.FIX_TO_ONE:
-                v.lb = 1
+                v = m.addVar(1, GRB.INFINITY, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
             elif affect == BranchConstr.FIX_TO_ZERO:
-                v.ub = 0
+                v = m.addVar(0, 0, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
+            else:
+                v = m.addVar(0, GRB.INFINITY, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
+
+            # check branching constraints
+
             # else doing nothing
             self._var[col] = v
+
+            # build cache
+            for i in range(0, len(col.seq)):
+                tid = col.seq[i]
+                self._cols_contain_test[tid].append(col)
+                if i > 0:
+                    self._cols_contain_pair_in_order[(col.seq[i - 1], col.seq[i])].append(col)
 
         m.update()
         return m
 
     def _bound_enforced_by_branch_constr(self, col):
         for constr in self._branch_constr_list:
-            affect = constr.enforce(col)
+            affect = constr.satisfy(col)
             if affect == BranchConstr.NO_IMPACT:
                 continue
             else:
@@ -177,7 +205,7 @@ class Node:
             # tardiness
             m.addConstr(start_time + t.dur <= t.deadline + tardiness + M * (1 - use_test))
 
-        ordered_test_list = sorted(TEST_MAP.values(), key=lambda t: t. test_id)
+        ordered_test_list = sorted(TEST_MAP.values(), key=lambda t: t.test_id)
         for t1 in ordered_test_list:
             tid1 = t1.test_id
             use_test1 = self._use_tests[tid1]
@@ -218,7 +246,9 @@ class Node:
                     # forbid assign tid to vid
                     m.addConstr(use_test <= 1 - use_vehicle)
                 elif constr._direction == BranchConstr.FIX_TO_ONE:
-                    m.addConstr(use_test >= use_vehicle)
+                    # if the vehicle is used, then test must be included
+                    # if other vehicle is used, then the test must be excluded
+                    m.addConstr(use_test == use_vehicle)
             elif constr._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
                 tid1 = constr._tid1
                 tid2 = constr._tid2
@@ -227,7 +257,7 @@ class Node:
                 if constr._direction == BranchConstr.FIX_TO_ZERO:
                     # test1 and test2 cannot appear together
                     m.addConstr(use_test1 + use_test2 <= 1)
-                elif constr._direction == BranchConstr.FIX_TO_ZERO:
+                elif constr._direction == BranchConstr.FIX_TO_ONE:
                     m.addConstr(use_test1 == use_test2)
             elif constr._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
                 tid1 = constr._tid1
@@ -239,7 +269,7 @@ class Node:
                     # test1 cannot before test2 on vehicle vid
                     m.addConstr(preced <= 1 - use_vehicle)
                 elif constr._direction == BranchConstr.FIX_TO_ONE:
-                    m.addConstr(preced >= use_vehicle)
+                    m.addConstr(preced == use_vehicle)
 
         m.update()
         return m
@@ -275,16 +305,14 @@ class Node:
             if obj_val < -0.001:
                 col = self._parse_col()
 
-
         return col, obj_val
-
 
     def _solve_lp(self):
         # build restricted master problem
         if not self._master_solver:
             self._master_solver = self._build_master_prb()
             # suppress output
-            self._master_solver.params.outputflag=0
+            self._master_solver.params.outputflag = 0
 
         # build the pricing problem
         if not self._pricer:
@@ -294,9 +322,11 @@ class Node:
 
         # column generation loop
         max_iter = 1e3
-        iter = 0
-        while iter < max_iter:
+        iter_times = 0
+        while iter_times < max_iter:
+            iter_times += 1
             self._master_solver.optimize()
+
             # get dual info
             test_dual = {}
             vehicle_dual = {}
@@ -318,33 +348,63 @@ class Node:
                 else:
                     print "master infeasible"
 
-
                 grb_col = Column()
                 grb_col.addTerms(1, self._vehicle_cap_constr[neg_col.vid])
                 for tid in neg_col.seq:
                     grb_col.addTerms(1, self._test_cover_constr[tid])
-                v = self._master_solver.addVar(0, GRB.INFINITY, 50+neg_col.cost, GRB.CONTINUOUS,
+                v = self._master_solver.addVar(0, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
                                                "use col" + str(neg_col.cid), grb_col)
                 self._var[neg_col] = v
                 self._master_solver.update()
 
                 self._col_set.append(neg_col)
+                print "ng col", neg_col, neg_col.vid
+
+        self.solved = True
+
+        # check the objective function value is > best integer solution value
+        # if yes, no need to branch further
+        objval = self._master_solver.objval
+        if objval > BPSolver.BEST_INC_VAL:
+            return
 
         # integrality check
+        int_res = self._int_check()
 
         # branch and create subproblems
-        pass
+        if not int_res is None:
+            node1, node2 = self._branch(int_res)
+            self._bp_solver._pending_nodes.put(node1)
+            self._bp_solver._pending_nodes.put(node2)
+            self._bp_solver._pending_nodes_best_bound.put((objval, node1))
+            self._bp_solver._pending_nodes_best_bound.put((objval, node2))
+        else:
+            # all integer, update the upper bound
+            if self._master_solver.objval < BPSolver.BEST_INC_VAL:
+                # record the incumbent
+                used_col = self._get_used_cols()
+                BPSolver.INC_SOL = used_col
+
+    def _get_used_cols(self):
+        used_col = []
+        for k, v in self._var.iteritems():
+            if v.x > 0.5:
+                used_col.append(k)
+        return used_col
 
     def _int_check(self):
-        res = self._int_check_test_on_vehicle()
-        if res:
-            return res
         res = self._int_check_tests_together()
         if res:
-            return res
+            return Node.FRACTIONAL_TEST_PAIR, res[0], res[1], None
+
+        res = self._int_check_test_on_vehicle()
+        if res:
+            return Node.FRACTIONAL_TEST_ON_VEHICLE, res[0], None, res[1]
         res = self._int_check_tests_pair_order_on_vehicle()
         if res:
-            return res
+            return Node.FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE, res[0], res[1], res[2]
+
+        return None
 
     def _int_check_test_on_vehicle(self):
         """
@@ -356,9 +416,10 @@ class Node:
         for tid in TEST_MAP:
             for vid in VEHICLE_MAP:
                 col_contain_test_on_this_vehicle = filter(lambda c: c.vid == vid,
-                                                          self._cols_contain_test_map[tid])
+                                                          self._cols_contain_test[tid])
                 lambda_val = sum([self._var[col].x
                                   for col in col_contain_test_on_this_vehicle])
+
                 # find the closed to half
                 if abs(lambda_val - 0.5) < dist_to_half:
                     dist_to_half = abs(lambda_val - 0.5)
@@ -381,8 +442,8 @@ class Node:
             for tid2 in ordered_test_list:
                 if tid2 >= tid1:
                     break
-                col_contain_both_tests = filter(lambda c: c in self._cols_contain_test_map[tid2],
-                                                self._cols_contain_test_map[tid1])
+                col_contain_both_tests = self._cols_contain_pair_in_order[tid1, tid2][:]
+                col_contain_both_tests.extend(self._cols_contain_pair_in_order[tid2, tid1][:])
                 lambda_val = sum([self._var[col].x for col in col_contain_both_tests])
                 if abs(lambda_val - 0.5) < dist_to_half:
                     dist_to_half = abs(lambda_val - 0.5)
@@ -405,24 +466,22 @@ class Node:
             for tid2 in ordered_test_list:
                 if tid2 >= tid1:
                     break
-                col_contain_both_tests = filter(lambda c: c in self._cols_contain_test_map[tid2],
-                                                self._cols_contain_test_map[tid1])
-                col_statisfy_order_t1_t2 = filter(lambda c: c.seq.index(tid1) < c.seq.index(tid2),
-                                                  col_contain_both_tests)
-                col_statisfy_order_t2_t1 = filter(lambda c: c.seq.index(tid1) > c.seq.index(tid2),
-                                                  col_contain_both_tests)
+                col_statisfy_order_t1_t2 = self._cols_contain_pair_in_order[tid1, tid2]
+                col_statisfy_order_t2_t1 = self._cols_contain_pair_in_order[tid2, tid1]
                 for vid in VEHICLE_MAP:
-                    lambda_val_t1_t2 = sum([self._var[col] for col in col_statisfy_order_t1_t2
+                    lambda_val_t1_t2 = sum([self._var[col].x for col in col_statisfy_order_t1_t2
                                             if col.vid == vid])
-                    lambda_val_t2_t1 = sum([self._var[col] for col in col_statisfy_order_t2_t1
+                    lambda_val_t2_t1 = sum([self._var[col].x for col in col_statisfy_order_t2_t1
                                             if col.vid == vid])
 
+                    if tid1 ==1854 and tid2 == 1853 and vid==1536:
+                        print "lambda = ", lambda_val_t1_t2
                     if abs(lambda_val_t1_t2 - 0.5) < dist_to_half:
-                        dist_to_half = abs(lambda_val_t1_t2)
+                        dist_to_half = abs(lambda_val_t1_t2 - 0.5)
                         test_pair = tid1, tid2, vid
 
                     if abs(lambda_val_t2_t1 - 0.5) < dist_to_half:
-                        dist_to_half = abs(lambda_val_t2_t1)
+                        dist_to_half = abs(lambda_val_t2_t1 - 0.5)
                         test_pair = tid2, tid1, vid
 
         if dist_to_half > 0.4888:
@@ -430,10 +489,42 @@ class Node:
         else:
             return test_pair
 
-    def _branch(self):
-        # do the integrality check
+    def _branch(self, int_res):
+        """
+        Branch according to the result of integrality check
+        :param int_res: result of integrality check
+        :return: subproblems to add to pending list
+        """
+        type = int_res[0]
+        if type == Node.FRACTIONAL_TEST_ON_VEHICLE:
+            # create two branches
+            constr1 = BranchConstr(int_res[1], None, int_res[-1], BranchConstr.TYPE_TEST_ONE_VEHICLE,
+                                   BranchConstr.FIX_TO_ONE)
+            constr2 = BranchConstr(int_res[1], None, int_res[-1], BranchConstr.TYPE_TEST_ONE_VEHICLE,
+                                   BranchConstr.FIX_TO_ZERO)
+        elif type == Node.FRACTIONAL_TEST_PAIR:
+            constr1 = BranchConstr(int_res[1], int_res[2], None, BranchConstr.TYPE_TEST_PAIR_TOGETHER,
+                                   BranchConstr.FIX_TO_ONE)
+            constr2 = BranchConstr(int_res[1], int_res[2], None, BranchConstr.TYPE_TEST_PAIR_TOGETHER,
+                                   BranchConstr.FIX_TO_ZERO)
+        elif type == Node.FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE:
+            constr1 = BranchConstr(int_res[1], int_res[2], int_res[-1], BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE,
+                                   BranchConstr.FIX_TO_ONE)
+            constr2 = BranchConstr(int_res[1], int_res[2], int_res[-1], BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE,
+                                   BranchConstr.FIX_TO_ZERO)
+        else:
+            print "Integrality result type error"
 
-        pass
+        # two branches created
+
+        constr_list1 = self._branch_constr_list[:]
+        constr_list2 = self._branch_constr_list[:]
+        constr_list1.append(constr1)
+        constr_list2.append(constr2)
+        node1 = Node(self._col_set, constr_list1, self._bp_solver)
+        node2 = Node(self._col_set, constr_list2, self._bp_solver)
+
+        return node1, node2
 
     def _parse_col(self):
         tests_used = []
@@ -451,7 +542,6 @@ class Node:
                 break
         col = Col(tests_used_sorted, vehicle_used)
         return col
-
 
 
 class BranchConstr:
@@ -484,32 +574,53 @@ class BranchConstr:
         self._type = type
         self._direction = direction
 
-    def enforce(self, col):
+    def satisfy(self, col):
         """
-        whether to enforce a branching constraint on a column; return true if such column needs to be fixed
-        to zero or one
-        :param col: a column
-        :return: FIX_TO_ZERO; FIX_TO_ONE; NO_IMPACT
+        If a column satisfies such branching constraint.
+        return true if satisfied, false otherwise.
+        In case of not satisfied, such column needs to be fixed to zero
+        :param col:
+        :return: true if satisfied, false if not satisfied
         """
-        if self._type == BranchConstr.TEST_ONE_VEHICLE:
-            # assume tid2 is none
-            if self.tid1 in col.seq and self._vid == col.vid:
-                return self._direction
-            else:
-                return BranchConstr.NO_IMPACT
-        elif self._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
-            if self._tid1 in col.seq and self._tid2 in col.seq:
-                return self._direction
-            else:
-                return BranchConstr.NO_IMPACT
-        elif self._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
-            if self._tid1 in col.seq and self._tid2 in col.seq and self._vid == col.vid:
-                if col.seq.index(self._tid1) < col.seq.index(self._tid2):
-                    return self._direction
-                else:
-                    return BranchConstr.NO_IMPACT
-            else:
-                return BranchConstr.NO_IMPACT
+        if self._direction == BranchConstr.FIX_TO_ZERO:
+            # if a column satisfies the criteria (contains relevant tests, vehicles), it will be fixed to zero
+            if self._type == BranchConstr.TYPE_TEST_ONE_VEHICLE:
+                if self._tid1 in col.seq and col.vid == self._vid:
+                    return BranchConstr.FIX_TO_ZERO
+            elif self._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
+                if self._tid1 in col.seq \
+                        and self._tid2 in col.seq:
+                    return BranchConstr.FIX_TO_ZERO
+            elif self._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
+                if self._tid1 in col.seq \
+                        and self._tid2 in col.seq \
+                        and col.seq.index(self._tid1) < col.seq.index(self._tid2) \
+                        and col.vid == self._vid:
+                    return BranchConstr.FIX_TO_ZERO
+            return BranchConstr.NO_IMPACT
+        elif self._direction == BranchConstr.FIX_TO_ONE:
+            # if a column satisfies partially the criteria (contains relevant tests, vehicles), it will be fixed to zero
+            if self._type == BranchConstr.TYPE_TEST_ONE_VEHICLE:
+                if self._tid1 in col.seq \
+                        and col.vid != self._vid:  # contains the test, but assign the test to other vehicles
+                    return BranchConstr.FIX_TO_ZERO
+            elif self._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
+                if self._tid1 in col.seq and self._tid2 not in col.seq:
+                    # if contains exactly one of two tests
+                    return BranchConstr.FIX_TO_ZERO
+                if self._tid2 in col.seq and self._tid1 not in col.seq:
+                    return BranchConstr.FIX_TO_ZERO
+            elif self._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
+                if self._tid1 in col.seq and self._tid2 not in col.seq:
+                    # if contains exactly one of two tests
+                    return BranchConstr.FIX_TO_ZERO
+                if self._tid2 in col.seq and self._tid1 not in col.seq:
+                    return BranchConstr.FIX_TO_ZERO
+                if self._tid1 in col.seq \
+                        and self._tid2 in col.seq:
+                    if col.seq.index(self._tid1) > col.seq.index(self._tid2):  # t1 after t2
+                        return BranchConstr.FIX_TO_ZERO
+            return BranchConstr.NO_IMPACT
         else:
-            print "Branching constraint undefined"
+            print "Unknown branching constraint type"
             return None

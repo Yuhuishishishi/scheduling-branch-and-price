@@ -1,7 +1,7 @@
 import unittest
 import tp3s_io
 
-filepath = r"C:\Users\yuhuishi\Desktop\scheduling-branch-and-price\data\157.tp3s"
+filepath = r"..\data\157.tp3s"
 
 class IOTestCase(unittest.TestCase):
     def testio(self):

@@ -4,7 +4,7 @@ import tp3s_io
 from bp import BPSolver
 from colsolver import ColSolver
 
-filepath = r"C:\Users\yuhuishi\Desktop\scheduling-branch-and-price\data\157.tp3s"
+filepath = r"..\data\157.tp3s"
 
 
 class BPSolverTestCase(unittest.TestCase):

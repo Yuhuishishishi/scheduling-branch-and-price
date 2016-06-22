@@ -3,7 +3,7 @@ import tp3s_io
 from colsolver import ColSolver, ColEnumerator
 
 
-filepath = r"C:\Users\yuhuishi\Desktop\scheduling-branch-and-price\data\157.tp3s"
+filepath = r"..\data\157.tp3s"
 
 class ColSolverTestCase(unittest.TestCase):
     def testcache(self):
