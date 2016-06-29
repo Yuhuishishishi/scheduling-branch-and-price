@@ -63,7 +63,7 @@ class ColSolver:
         m.update()
         return m
 
-    def __parse_sol__(self, model):
+    def __parse_sol__(self):
         vehicle_usage = 0
         for c, v in self.var.iteritems():
             if v.X > 0.5:
@@ -76,7 +76,7 @@ class ColSolver:
         m.optimize()
 
         if m.status == GRB.OPTIMAL:
-            self.__parse_sol__(m)
+            self.__parse_sol__()
 
     def solve_col_gen(self):
         m = self.__build_full_enum_model__(startlvl=0)

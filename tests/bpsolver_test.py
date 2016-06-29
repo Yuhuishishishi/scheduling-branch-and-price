@@ -13,6 +13,7 @@ class BPSolverTestCase(unittest.TestCase):
         print rehits
 
         colsolver = ColSolver(tests, vehicles, rehits)
+        # colsolver.solve_full_enum()
 
         solver = BPSolver(tests,vehicles,rehits)
         solver.solve()

@@ -2,8 +2,8 @@ import unittest
 import tp3s_io
 from colsolver import ColSolver, ColEnumerator
 
-
 filepath = r"..\data\157.tp3s"
+
 
 class ColSolverTestCase(unittest.TestCase):
     def testcache(self):
@@ -27,7 +27,6 @@ class ColSolverTestCase(unittest.TestCase):
         collist = enumerator.enum()
         seq = collist[-1]
         print seq, seq.cost
-
 
     def testgrbsolver(self):
         tests, vehicles, rehits = tp3s_io.read_inst(filepath)

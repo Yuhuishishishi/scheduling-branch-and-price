@@ -38,6 +38,7 @@ class BPSolver:
         iter_times = 0
         while not (self._pending_nodes.empty() or self._pending_nodes_best_bound.empty()):
             # if iter_times % 2 == 0:
+            print '# Pending nodes', self._pending_nodes.qsize()
             node_to_process = self._pending_nodes.get()
             # else:
             #     _, node_to_process = self._pending_nodes_best_bound.get()
@@ -46,9 +47,15 @@ class BPSolver:
 
             iter_times += 1
 
-        for k,v in BPSolver.INC_SOL.iteritems():
+        used_col = []
+        for k, v in BPSolver.INC_SOL.iteritems():
             if v > 0.001:
-                print k,v
+                print k, v
+                used_col.append(k)
+
+        print 'Final obj val', BPSolver.BEST_INC_VAL
+        print 'Used vehicle', len(used_col)
+
 
 class Node:
     NID = 0
@@ -367,26 +374,42 @@ class Node:
 
         # check the objective function value is > best integer solution value
         # if yes, no need to branch further
-        objval = self._master_solver.objval
-        if objval > BPSolver.BEST_INC_VAL:
+        lp_objval = self._master_solver.objval
+        if lp_objval > BPSolver.BEST_INC_VAL:
+            return
+
+        # solve the ip version
+        int_model = self._master_solver.copy()
+        vars = int_model.getVars()
+        for v in vars:
+            v.vtype = GRB.BINARY
+        int_model.update()
+        int_model.optimize()
+        ip_objval = int_model.objval
+        print 'Int obj val', ip_objval
+        if ip_objval < BPSolver.BEST_INC_VAL:
+            BPSolver.BEST_INC_VAL = ip_objval
+        if abs(ip_objval-lp_objval) < 0.001:
+            print "OK"
             return
 
         # integrality check
         int_res = self._int_check()
 
         # branch and create subproblems
-        if not int_res is None:
+        if int_res is not None:
             node1, node2 = self._branch(int_res)
             self._bp_solver._pending_nodes.put(node1)
             self._bp_solver._pending_nodes.put(node2)
-            self._bp_solver._pending_nodes_best_bound.put((objval, node1))
-            self._bp_solver._pending_nodes_best_bound.put((objval, node2))
+            self._bp_solver._pending_nodes_best_bound.put((lp_objval, node1))
+            self._bp_solver._pending_nodes_best_bound.put((lp_objval, node2))
         else:
             # all integer, update the upper bound
             if self._master_solver.objval < BPSolver.BEST_INC_VAL:
                 # record the incumbent
                 used_col = self._get_used_cols()
                 BPSolver.INC_SOL = used_col
+                BPSolver.BEST_INC_VAL = self._master_solver.objval
 
     def _get_used_cols(self):
         used_col = {}
@@ -476,7 +499,7 @@ class Node:
                     lambda_val_t2_t1 = sum([self._var[col].x for col in col_statisfy_order_t2_t1
                                             if col.vid == vid])
 
-                    if tid1 ==1854 and tid2 == 1853 and vid==1536:
+                    if tid1 == 1854 and tid2 == 1853 and vid == 1536:
                         print "lambda = ", lambda_val_t1_t2
                     if abs(lambda_val_t1_t2 - 0.5) < dist_to_half:
                         dist_to_half = abs(lambda_val_t1_t2 - 0.5)
