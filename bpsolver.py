@@ -1,29 +1,23 @@
-from Queue import Queue, PriorityQueue, LifoQueue
+from Queue import PriorityQueue, LifoQueue
 from collections import defaultdict
 
 from gurobipy import *
 
+import tp3s_io
 from colsolver import ColEnumerator, Col
-
-TEST_MAP = {}
-VEHICLE_MAP = {}
-REHIT_MAP = {}
 
 
 class BPSolver:
     BEST_INC_VAL = float("inf")
     INC_SOL = None
 
-    def __init__(self, tests, vehicles, rehits):
-        map(lambda t: TEST_MAP.update({t.test_id: t}), tests)
-        map(lambda v: VEHICLE_MAP.update({v.vehicle_id: v}), vehicles)
-        map(lambda r: REHIT_MAP.update({r: rehits[r]}), rehits)
+    def __init__(self):
         self._pending_nodes = LifoQueue()
         self._pending_nodes_best_bound = PriorityQueue()
 
-        self._tests = tests
-        self._vehicles = vehicles
-        self._rehits = rehits
+    def add_node(self, lpbound, node):
+        self._pending_nodes.put(node)
+        self._pending_nodes_best_bound.put((lpbound, node))
 
     def solve(self):
         # enumerate the initial columns
@@ -58,8 +52,6 @@ class BPSolver:
 
 
 class Node:
-    NID = 0
-
     FRACTIONAL_TEST_ON_VEHICLE = 1
     FRACTIONAL_TEST_PAIR = 2
     FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE = 3
@@ -77,12 +69,11 @@ class Node:
             print "Entering node"
             print "Branching constraint:"
             for c in self._branch_constr_list:
-                print c._tid1, c._tid2, c._vid, c._direction
+                print c.tid1, c.tid2, c.vid, c.direction
             self._solve_lp()
 
     def _build_master_prb(self):
-        m = Model("bp sub problem {}".format(Node.NID))
-        Node.NID += 1
+        m = Model("bp sub problem")
 
         '''========================================
                         constraints
@@ -90,15 +81,16 @@ class Node:
 
         # test cover constraints
         self._test_cover_constr = {}
-        for tid in TEST_MAP:
+        for tid in tp3s_io.TEST_MAP:
             constr = m.addConstr(0, GRB.GREATER_EQUAL, 1, name="cover test %d" % tid)
             self._test_cover_constr[tid] = constr
 
         # vehicle capacity constraints
         self._vehicle_cap_constr = {}
-        for vid in VEHICLE_MAP:
-            constr = m.addConstr(0, GRB.LESS_EQUAL, 1, name="vehicle cap %d" % vid)
-            self._vehicle_cap_constr[vid] = constr
+        for vrelease in tp3s_io.VEHICLE_MAP:
+            constr = m.addConstr(0, GRB.LESS_EQUAL, len(tp3s_io.VEHICLE_MAP[vrelease]),
+                                 name="vehicle cap %d" % vrelease)
+            self._vehicle_cap_constr[vrelease] = constr
 
         m.update()
 
@@ -112,7 +104,7 @@ class Node:
         self._cols_contain_pair_in_order = defaultdict(list)
 
         for col in self._col_set:
-            v_constr = self._vehicle_cap_constr[col.vid]
+            v_constr = self._vehicle_cap_constr[col.release]
             grb_col = Column()
             grb_col.addTerms(1, v_constr)
 
@@ -128,8 +120,6 @@ class Node:
             else:
                 v = m.addVar(0, GRB.INFINITY, 50 + col.cost, GRB.CONTINUOUS, "use col" + str(col), grb_col)
 
-            # check branching constraints
-
             # else doing nothing
             self._var[col] = v
 
@@ -137,8 +127,8 @@ class Node:
             for i in range(0, len(col.seq)):
                 tid = col.seq[i]
                 self._cols_contain_test[tid].append(col)
-                if i > 0:
-                    self._cols_contain_pair_in_order[(col.seq[i - 1], col.seq[i])].append(col)
+                for j in range(0, i):
+                    self._cols_contain_pair_in_order[(col.seq[j], col.seq[i])].append(col)
 
         m.update()
         return m
@@ -165,7 +155,7 @@ class Node:
         '''=================================
                     variables
         ================================='''
-        for tid in TEST_MAP:
+        for tid in tp3s_io.TEST_MAP:
             use_test = m.addVar(0, 1, 1, GRB.BINARY, "use test %d" % tid)
             tardiness = m.addVar(0, GRB.INFINITY, 1, GRB.CONTINUOUS, "tardiness of test %d" % tid)
             start_time = m.addVar(0, GRB.INFINITY, 0, GRB.CONTINUOUS, "start time of test %d" % tid)
@@ -174,12 +164,12 @@ class Node:
             self._tardiness[tid] = tardiness
             self._start[tid] = start_time
 
-        for vid in VEHICLE_MAP:
-            use_vehicle = m.addVar(0, 1, 1, GRB.BINARY, "use vehicle %d" % vid)
-            self._use_vehicles[vid] = use_vehicle
+        for vrelease in tp3s_io.VEHICLE_MAP:
+            use_vehicle = m.addVar(0, 1, 1, GRB.BINARY, "use vehicle %d" % vrelease)
+            self._use_vehicles[vrelease] = use_vehicle
 
-        for tid1 in TEST_MAP:
-            for tid2 in TEST_MAP:
+        for tid1 in tp3s_io.TEST_MAP:
+            for tid2 in tp3s_io.TEST_MAP:
                 if tid1 == tid2:
                     continue
 
@@ -191,15 +181,15 @@ class Node:
         ================================='''
         m.objcon = 50
         m.update()
-        M = max([t.dur for t in TEST_MAP.values()]) * 5
+        big_m = max([t.dur for t in tp3s_io.TEST_MAP.values()]) * 5
 
         # vehicle related constraints
         # use one vehicle
         m.addConstr(quicksum(self._use_vehicles.values()) == 1)
 
         # test related constraints
-        for tid in TEST_MAP:
-            t = TEST_MAP[tid]
+        for tid in tp3s_io.TEST_MAP:
+            t = tp3s_io.TEST_MAP[tid]
             start_time = self._start[tid]
             tardiness = self._tardiness[tid]
             use_test = self._use_tests[tid]
@@ -209,13 +199,13 @@ class Node:
 
             # start after vehicle release
             m.addConstr(start_time >=
-                        quicksum([self._use_vehicles[v.vehicle_id] * v.release
-                                  for v in VEHICLE_MAP.values()]))
+                        quicksum([self._use_vehicles[vrelease] * vrelease
+                                  for vrelease in tp3s_io.VEHICLE_MAP]))
 
             # tardiness
-            m.addConstr(start_time + t.dur <= t.deadline + tardiness + M * (1 - use_test))
+            m.addConstr(start_time + t.dur <= t.deadline + tardiness + big_m * (1 - use_test))
 
-        ordered_test_list = sorted(TEST_MAP.values(), key=lambda t: t.test_id)
+        ordered_test_list = sorted(tp3s_io.TEST_MAP.values(), key=lambda x: x.test_id)
         for t1 in ordered_test_list:
             tid1 = t1.test_id
             use_test1 = self._use_tests[tid1]
@@ -234,51 +224,51 @@ class Node:
                 m.addConstr(preced12 + preced21 <= 0.5 * (use_test1 + use_test2))
 
                 m.addConstr(start_time1 + t1.dur <=
-                            start_time2 + M * (1 - preced12))
+                            start_time2 + big_m * (1 - preced12))
                 m.addConstr(start_time2 + t2.dur <=
-                            start_time1 + M * (1 - preced21))
+                            start_time1 + big_m * (1 - preced21))
 
                 # rehits
-                if not REHIT_MAP[tid1][tid2]:
+                if not tp3s_io.REHIT_MAP[tid1][tid2]:
                     preced12.ub = 0
 
-                if not REHIT_MAP[tid2][tid1]:
+                if not tp3s_io.REHIT_MAP[tid2][tid1]:
                     preced21.ub = 0
 
         # branching constraints related constraints
         for constr in self._branch_constr_list:
-            if constr._type == BranchConstr.TYPE_TEST_ONE_VEHICLE:
-                tid = constr._tid1
-                vid = constr._vid
+            if constr.btype == BranchConstr.TYPE_TEST_ONE_VEHICLE:
+                tid = constr.tid1
+                vid = constr.vid
                 use_test = self._use_tests[tid]
                 use_vehicle = self._use_vehicles[vid]
-                if constr._direction == BranchConstr.FIX_TO_ZERO:
+                if constr.direction == BranchConstr.FIX_TO_ZERO:
                     # forbid assign tid to vid
                     m.addConstr(use_test <= 1 - use_vehicle)
-                elif constr._direction == BranchConstr.FIX_TO_ONE:
+                elif constr.direction == BranchConstr.FIX_TO_ONE:
                     # if the vehicle is used, then test must be included
                     # if other vehicle is used, then the test must be excluded
                     m.addConstr(use_test == use_vehicle)
-            elif constr._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
-                tid1 = constr._tid1
-                tid2 = constr._tid2
+            elif constr.btype == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
+                tid1 = constr.tid1
+                tid2 = constr.tid2
                 use_test1 = self._use_tests[tid1]
                 use_test2 = self._use_tests[tid2]
-                if constr._direction == BranchConstr.FIX_TO_ZERO:
+                if constr.direction == BranchConstr.FIX_TO_ZERO:
                     # test1 and test2 cannot appear together
                     m.addConstr(use_test1 + use_test2 <= 1)
-                elif constr._direction == BranchConstr.FIX_TO_ONE:
+                elif constr.direction == BranchConstr.FIX_TO_ONE:
                     m.addConstr(use_test1 == use_test2)
-            elif constr._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
-                tid1 = constr._tid1
-                tid2 = constr._tid2
-                vid = constr._vid
+            elif constr.btype == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
+                tid1 = constr.tid1
+                tid2 = constr.tid2
+                vid = constr.vid
                 use_vehicle = self._use_vehicles[vid]
                 preced = self._preced[tid1, tid2]
-                if constr._direction == BranchConstr.FIX_TO_ZERO:
+                if constr.direction == BranchConstr.FIX_TO_ZERO:
                     # test1 cannot before test2 on vehicle vid
                     m.addConstr(preced <= 1 - use_vehicle)
-                elif constr._direction == BranchConstr.FIX_TO_ONE:
+                elif constr.direction == BranchConstr.FIX_TO_ONE:
                     m.addConstr(preced == use_vehicle)
 
         m.update()
@@ -286,27 +276,15 @@ class Node:
 
     def _price(self, test_dual, vehicle_dual):
         # modify coeff in obj
-        for tid in TEST_MAP:
+        for tid in tp3s_io.TEST_MAP:
             use_test = self._use_tests[tid]
             use_test.obj = - test_dual[tid]
-        for vid in VEHICLE_MAP:
-            use_vehicle = self._use_vehicles[vid]
-            use_vehicle.obj = -vehicle_dual[vid]
+        for vrelease in tp3s_io.VEHICLE_MAP:
+            use_vehicle = self._use_vehicles[vrelease]
+            use_vehicle.obj = -vehicle_dual[vrelease]
 
         self._pricer.update()
         self._pricer.optimize()
-
-        # sorted_t = sorted(TEST_MAP.keys())
-        # for tid1 in sorted_t:
-        #     for tid2 in sorted_t:
-        #         if tid1 <= tid2:
-        #             break
-        #         print "use {}: {}, use {}: {}".format(tid1, self._use_tests[tid1].x, tid2, self._use_tests[tid2].x)
-        #         print tid1,tid2,self._preced[tid1,tid2].x
-        #         print tid2,tid1,self._preced[tid1,tid2].x
-
-
-
 
         col = None
         obj_val = None
@@ -359,7 +337,7 @@ class Node:
                     print "master infeasible"
 
                 grb_col = Column()
-                grb_col.addTerms(1, self._vehicle_cap_constr[neg_col.vid])
+                grb_col.addTerms(1, self._vehicle_cap_constr[neg_col.release])
                 for tid in neg_col.seq:
                     grb_col.addTerms(1, self._test_cover_constr[tid])
                 v = self._master_solver.addVar(0, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
@@ -368,7 +346,7 @@ class Node:
                 self._master_solver.update()
 
                 self._col_set.append(neg_col)
-                print "ng col", neg_col, neg_col.vid
+                print "ng col", neg_col, neg_col.release
 
         self.solved = True
 
@@ -380,8 +358,8 @@ class Node:
 
         # solve the ip version
         int_model = self._master_solver.copy()
-        vars = int_model.getVars()
-        for v in vars:
+        all_vars = int_model.getVars()
+        for v in all_vars:
             v.vtype = GRB.BINARY
         int_model.update()
         int_model.optimize()
@@ -389,7 +367,7 @@ class Node:
         print 'Int obj val', ip_objval
         if ip_objval < BPSolver.BEST_INC_VAL:
             BPSolver.BEST_INC_VAL = ip_objval
-        if abs(ip_objval-lp_objval) < 0.001:
+        if abs(ip_objval - lp_objval) < 0.001:
             print "OK"
             return
 
@@ -399,10 +377,8 @@ class Node:
         # branch and create subproblems
         if int_res is not None:
             node1, node2 = self._branch(int_res)
-            self._bp_solver._pending_nodes.put(node1)
-            self._bp_solver._pending_nodes.put(node2)
-            self._bp_solver._pending_nodes_best_bound.put((lp_objval, node1))
-            self._bp_solver._pending_nodes_best_bound.put((lp_objval, node2))
+            self._bp_solver.add_node(lp_objval, node1)
+            self._bp_solver.add_node(lp_objval, node2)
         else:
             # all integer, update the upper bound
             if self._master_solver.objval < BPSolver.BEST_INC_VAL:
@@ -438,9 +414,9 @@ class Node:
         """
         tid_vid_pair = None
         dist_to_half = float("inf")
-        for tid in TEST_MAP:
-            for vid in VEHICLE_MAP:
-                col_contain_test_on_this_vehicle = filter(lambda c: c.vid == vid,
+        for tid in tp3s_io.TEST_MAP:
+            for vrelease in tp3s_io.VEHICLE_MAP:
+                col_contain_test_on_this_vehicle = filter(lambda c: c.release == vrelease,
                                                           self._cols_contain_test[tid])
                 lambda_val = sum([self._var[col].x
                                   for col in col_contain_test_on_this_vehicle])
@@ -448,7 +424,7 @@ class Node:
                 # find the closed to half
                 if abs(lambda_val - 0.5) < dist_to_half:
                     dist_to_half = abs(lambda_val - 0.5)
-                    tid_vid_pair = tid, vid
+                    tid_vid_pair = tid, vrelease
         # check the distance
         if dist_to_half > 0.4888:
             return None
@@ -462,7 +438,7 @@ class Node:
         """
         dist_to_half = float("inf")
         test_pair = None
-        ordered_test_list = sorted(TEST_MAP.keys())
+        ordered_test_list = sorted(tp3s_io.TEST_MAP.keys())
         for tid1 in ordered_test_list:
             for tid2 in ordered_test_list:
                 if tid2 >= tid1:
@@ -486,28 +462,26 @@ class Node:
         """
         dist_to_half = float("inf")
         test_pair = None
-        ordered_test_list = sorted(TEST_MAP.keys())
+        ordered_test_list = sorted(tp3s_io.TEST_MAP.keys())
         for tid1 in ordered_test_list:
             for tid2 in ordered_test_list:
                 if tid2 >= tid1:
                     break
                 col_statisfy_order_t1_t2 = self._cols_contain_pair_in_order[tid1, tid2]
                 col_statisfy_order_t2_t1 = self._cols_contain_pair_in_order[tid2, tid1]
-                for vid in VEHICLE_MAP:
+                for vrelease in tp3s_io.VEHICLE_MAP:
                     lambda_val_t1_t2 = sum([self._var[col].x for col in col_statisfy_order_t1_t2
-                                            if col.vid == vid])
+                                            if col.release == vrelease])
                     lambda_val_t2_t1 = sum([self._var[col].x for col in col_statisfy_order_t2_t1
-                                            if col.vid == vid])
+                                            if col.release == vrelease])
 
-                    if tid1 == 1854 and tid2 == 1853 and vid == 1536:
-                        print "lambda = ", lambda_val_t1_t2
                     if abs(lambda_val_t1_t2 - 0.5) < dist_to_half:
                         dist_to_half = abs(lambda_val_t1_t2 - 0.5)
-                        test_pair = tid1, tid2, vid
+                        test_pair = tid1, tid2, vrelease
 
                     if abs(lambda_val_t2_t1 - 0.5) < dist_to_half:
                         dist_to_half = abs(lambda_val_t2_t1 - 0.5)
-                        test_pair = tid2, tid1, vid
+                        test_pair = tid2, tid1, vrelease
 
         if dist_to_half > 0.4888:
             return None
@@ -520,25 +494,27 @@ class Node:
         :param int_res: result of integrality check
         :return: subproblems to add to pending list
         """
-        type = int_res[0]
-        if type == Node.FRACTIONAL_TEST_ON_VEHICLE:
+        btype = int_res[0]
+        if btype == Node.FRACTIONAL_TEST_ON_VEHICLE:
             # create two branches
             constr1 = BranchConstr(int_res[1], None, int_res[-1], BranchConstr.TYPE_TEST_ONE_VEHICLE,
                                    BranchConstr.FIX_TO_ONE)
             constr2 = BranchConstr(int_res[1], None, int_res[-1], BranchConstr.TYPE_TEST_ONE_VEHICLE,
                                    BranchConstr.FIX_TO_ZERO)
-        elif type == Node.FRACTIONAL_TEST_PAIR:
+        elif btype == Node.FRACTIONAL_TEST_PAIR:
             constr1 = BranchConstr(int_res[1], int_res[2], None, BranchConstr.TYPE_TEST_PAIR_TOGETHER,
                                    BranchConstr.FIX_TO_ONE)
             constr2 = BranchConstr(int_res[1], int_res[2], None, BranchConstr.TYPE_TEST_PAIR_TOGETHER,
                                    BranchConstr.FIX_TO_ZERO)
-        elif type == Node.FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE:
+        elif btype == Node.FRACTIONAL_TEST_ORDER_PAIR_ON_VEHICLE:
             constr1 = BranchConstr(int_res[1], int_res[2], int_res[-1], BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE,
                                    BranchConstr.FIX_TO_ONE)
             constr2 = BranchConstr(int_res[1], int_res[2], int_res[-1], BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE,
                                    BranchConstr.FIX_TO_ZERO)
         else:
-            print "Integrality result type error"
+            print "Integrality result btype error"
+            constr1 = None
+            constr2 = None
 
         # two branches created
 
@@ -553,17 +529,17 @@ class Node:
 
     def _parse_col(self):
         tests_used = []
-        for tid in TEST_MAP:
+        for tid in tp3s_io.TEST_MAP:
             use_test = self._use_tests[tid]
             if use_test.x > 0.5:
                 tests_used.append(tid)
 
         tests_used_sorted = sorted(tests_used, key=lambda tid: self._start[tid].x)
         vehicle_used = 0
-        for vid in VEHICLE_MAP:
-            use_vehicle = self._use_vehicles[vid]
+        for vrelease in tp3s_io.VEHICLE_MAP:
+            use_vehicle = self._use_vehicles[vrelease]
             if use_vehicle.x > 0.5:
-                vehicle_used = vid
+                vehicle_used = vrelease
                 break
         col = Col(tests_used_sorted, vehicle_used)
         return col
@@ -583,21 +559,21 @@ class BranchConstr:
     FIX_TO_ONE = 1
     NO_IMPACT = 2
 
-    def __init__(self, tid1, tid2, vid, type, direction):
+    def __init__(self, tid1, tid2, vid, btype, direction):
         """
         constructor of a branch constraint
         :param tid1: id of first test
         :param tid2: id of second test
         :param vid:  id of vehicle
-        :param type: type of branching constraint (TEST_ON_VEHICLE, TEST_PAIR_TOGETHER, TEST_PAIR_ORDER_ON_VEHICLE)
+        :param btype: btype of branching constraint (TEST_ON_VEHICLE, TEST_PAIR_TOGETHER, TEST_PAIR_ORDER_ON_VEHICLE)
         :param direction: branching firection (FIX_TO_ZERO, FIX_TO_ONE)
         :return: a branching constraint
         """
-        self._tid1 = tid1
-        self._tid2 = tid2
-        self._vid = vid
-        self._type = type
-        self._direction = direction
+        self.tid1 = tid1
+        self.tid2 = tid2
+        self.vid = vid
+        self.btype = btype
+        self.direction = direction
 
     def satisfy(self, col):
         """
@@ -607,45 +583,45 @@ class BranchConstr:
         :param col:
         :return: true if satisfied, false if not satisfied
         """
-        if self._direction == BranchConstr.FIX_TO_ZERO:
+        if self.direction == BranchConstr.FIX_TO_ZERO:
             # if a column satisfies the criteria (contains relevant tests, vehicles), it will be fixed to zero
-            if self._type == BranchConstr.TYPE_TEST_ONE_VEHICLE:
-                if self._tid1 in col.seq and col.vid == self._vid:
+            if self.btype == BranchConstr.TYPE_TEST_ONE_VEHICLE:
+                if self.tid1 in col.seq and col.vid == self.vid:
                     return BranchConstr.FIX_TO_ZERO
-            elif self._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
-                if self._tid1 in col.seq \
-                        and self._tid2 in col.seq:
+            elif self.btype == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
+                if self.tid1 in col.seq \
+                        and self.tid2 in col.seq:
                     return BranchConstr.FIX_TO_ZERO
-            elif self._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
-                if self._tid1 in col.seq \
-                        and self._tid2 in col.seq \
-                        and col.seq.index(self._tid1) < col.seq.index(self._tid2) \
-                        and col.vid == self._vid:
+            elif self.btype == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
+                if self.tid1 in col.seq \
+                        and self.tid2 in col.seq \
+                        and col.seq.index(self.tid1) < col.seq.index(self.tid2) \
+                        and col.vid == self.vid:
                     return BranchConstr.FIX_TO_ZERO
             return BranchConstr.NO_IMPACT
-        elif self._direction == BranchConstr.FIX_TO_ONE:
+        elif self.direction == BranchConstr.FIX_TO_ONE:
             # if a column satisfies partially the criteria (contains relevant tests, vehicles), it will be fixed to zero
-            if self._type == BranchConstr.TYPE_TEST_ONE_VEHICLE:
-                if self._tid1 in col.seq \
-                        and col.vid != self._vid:  # contains the test, but assign the test to other vehicles
+            if self.btype == BranchConstr.TYPE_TEST_ONE_VEHICLE:
+                if self.tid1 in col.seq \
+                        and col.vid != self.vid:  # contains the test, but assign the test to other vehicles
                     return BranchConstr.FIX_TO_ZERO
-            elif self._type == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
-                if self._tid1 in col.seq and self._tid2 not in col.seq:
+            elif self.btype == BranchConstr.TYPE_TEST_PAIR_TOGETHER:
+                if self.tid1 in col.seq and self.tid2 not in col.seq:
                     # if contains exactly one of two tests
                     return BranchConstr.FIX_TO_ZERO
-                if self._tid2 in col.seq and self._tid1 not in col.seq:
+                if self.tid2 in col.seq and self.tid1 not in col.seq:
                     return BranchConstr.FIX_TO_ZERO
-            elif self._type == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
-                if self._tid1 in col.seq and self._tid2 not in col.seq:
+            elif self.btype == BranchConstr.TYPE_TEST_PAIR_ORDER_ON_VEHICLE:
+                if self.tid1 in col.seq and self.tid2 not in col.seq:
                     # if contains exactly one of two tests
                     return BranchConstr.FIX_TO_ZERO
-                if self._tid2 in col.seq and self._tid1 not in col.seq:
+                if self.tid2 in col.seq and self.tid1 not in col.seq:
                     return BranchConstr.FIX_TO_ZERO
-                if self._tid1 in col.seq \
-                        and self._tid2 in col.seq:
-                    if col.seq.index(self._tid1) > col.seq.index(self._tid2):  # t1 after t2
+                if self.tid1 in col.seq \
+                        and self.tid2 in col.seq:
+                    if col.seq.index(self.tid1) > col.seq.index(self.tid2):  # t1 after t2
                         return BranchConstr.FIX_TO_ZERO
             return BranchConstr.NO_IMPACT
         else:
-            print "Unknown branching constraint type"
+            print "Unknown branching constraint btype"
             return None
