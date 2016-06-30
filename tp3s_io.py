@@ -4,15 +4,20 @@ from collections import namedtuple, defaultdict
 TestRequest = namedtuple("TestRequest", ["test_id", "release", "deadline", "dur"])
 Vehicle = namedtuple("Vehicle", ["vehicle_id", "release"])
 
+# global data info
+TEST_MAP = {}
+VEHICLE_MAP = defaultdict(list)
+REHIT_MAP = {}
 
-def __read_json__(filepath):
+
+def _read_json(filepath):
     with open(filepath) as f:
         data = f.read()
     j = json.loads(data)
     return j
 
 
-def __parse_test__(j):
+def _parse_test(j):
     tests = []
     data = j["tests"]
     for t in data:
@@ -25,7 +30,7 @@ def __parse_test__(j):
     return sorted(tests, key=lambda x: x.test_id)
 
 
-def __parse_vehicle__(j):
+def _parse_vehicle(j):
     vehicles = []
     data = j["vehicles"]
     for v in data:
@@ -36,7 +41,7 @@ def __parse_vehicle__(j):
     return vehicles
 
 
-def __parse_rehitrule__(j):
+def _parse_rehitrule(j):
     rulemap = defaultdict(dict)
     data = j["rehit"]
     for k, v in data.iteritems():
@@ -49,10 +54,15 @@ def __parse_rehitrule__(j):
 
 
 def read_inst(filepath):
-    j = __read_json__(filepath)
-    tests = __parse_test__(j)
-    vehicles = __parse_vehicle__(j)
-    rehits = __parse_rehitrule__(j)
+    j = _read_json(filepath)
+    tests = _parse_test(j)
+    vehicles = _parse_vehicle(j)
+    rehits = _parse_rehitrule(j)
     print "{} tests read in.".format(len(tests))
     print "{} vehicles read in.".format(len(vehicles))
-    return tests,vehicles,rehits
+    # build the cache maps
+    map(lambda t: TEST_MAP.update({t.test_id: t}), tests)
+    map(lambda v: VEHICLE_MAP[v.release].append(v), vehicles)
+    map(lambda k: REHIT_MAP.update({k[0]: k[1]}), rehits.iteritems())
+
+    return tests, vehicles, rehits
