@@ -340,8 +340,28 @@ class Node:
                 grb_col.addTerms(1, self._vehicle_cap_constr[neg_col.release])
                 for tid in neg_col.seq:
                     grb_col.addTerms(1, self._test_cover_constr[tid])
-                v = self._master_solver.addVar(0, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
-                                               "use col" + str(neg_col.cid), grb_col)
+
+                # check if the newly added variable should be fix to zero or one
+                affect = self._bound_enforced_by_branch_constr(neg_col)
+                if affect == BranchConstr.FIX_TO_ONE:
+                    v = self._master_solver.addVar(1, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
+                                                   "use col" + str(neg_col.cid), grb_col)
+                elif affect == BranchConstr.FIX_TO_ZERO:
+                    v = self._master_solver.addVar(0, 0, 50 + neg_col.cost, GRB.CONTINUOUS,
+                                                   "use col" + str(neg_col.cid), grb_col)
+                else:
+                    v = self._master_solver.addVar(0, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
+                                 "use col" + str(neg_col.cid), grb_col)
+                # v = self._master_solver.addVar(0, GRB.INFINITY, 50 + neg_col.cost, GRB.CONTINUOUS,
+                #                                "use col" + str(neg_col.cid), grb_col)
+
+                # update the cache
+                for i in range(0, len(neg_col.seq)):
+                    tid = neg_col.seq[i]
+                    self._cols_contain_test[tid].append(neg_col)
+                    for j in range(0, i):
+                        self._cols_contain_pair_in_order[(neg_col.seq[j], neg_col.seq[i])].append(neg_col)
+
                 self._var[neg_col] = v
                 self._master_solver.update()
 
@@ -367,6 +387,8 @@ class Node:
         print 'Int obj val', ip_objval
         if ip_objval < BPSolver.BEST_INC_VAL:
             BPSolver.BEST_INC_VAL = ip_objval
+            # fetch the columns
+
         if abs(ip_objval - lp_objval) < 0.001:
             print "OK"
             return
@@ -426,6 +448,7 @@ class Node:
                     dist_to_half = abs(lambda_val - 0.5)
                     tid_vid_pair = tid, vrelease
         # check the distance
+        print "min dist to half", dist_to_half
         if dist_to_half > 0.4888:
             return None
         else:
@@ -446,10 +469,19 @@ class Node:
                 col_contain_both_tests = self._cols_contain_pair_in_order[tid1, tid2][:]
                 col_contain_both_tests.extend(self._cols_contain_pair_in_order[tid2, tid1][:])
                 lambda_val = sum([self._var[col].x for col in col_contain_both_tests])
+
                 if abs(lambda_val - 0.5) < dist_to_half:
                     dist_to_half = abs(lambda_val - 0.5)
                     test_pair = tid1, tid2
+
+        # for c in self._col_set:
+        #     if 1880 in c.seq or 1854 in c.seq:
+        #
+        #         if self._var[c].x > 0:
+        #             print c, c.release, self._var[c].x
         # check the distance
+        print "min dist to half", dist_to_half
+
         if dist_to_half > 0.4888:
             return None
         else:
@@ -482,6 +514,9 @@ class Node:
                     if abs(lambda_val_t2_t1 - 0.5) < dist_to_half:
                         dist_to_half = abs(lambda_val_t2_t1 - 0.5)
                         test_pair = tid2, tid1, vrelease
+
+
+        print "min dist to half", dist_to_half
 
         if dist_to_half > 0.4888:
             return None

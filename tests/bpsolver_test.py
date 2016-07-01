@@ -3,7 +3,7 @@ import unittest
 import tp3s_io
 from bpsolver import BPSolver
 
-filepath = r"..\data\157.tp3s"
+filepath = r"..\data\158.tp3s"
 
 
 class BPSolverTestCase(unittest.TestCase):
